@@ -1,9 +1,11 @@
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
-use std::{fmt, result, time};
+use std::time;
 
-use crate::{endpoints::State, util, Error, Result, Round};
+use crate::{
+    endpoints::{Info, Random, State},
+    util, Error, Result,
+};
 
 macro_rules! make_url {
     ("info", $ep:expr) => {
@@ -22,12 +24,6 @@ pub(crate) enum Http {
 }
 
 impl Http {
-    pub(crate) fn to_base_url(&self) -> String {
-        match self {
-            Http::DrandApi => "https://api.drand.sh".to_string(),
-        }
-    }
-
     pub(crate) async fn boot(&self, mut state: State) -> Result<State> {
         let endpoint = self.to_base_url();
         let client = reqwest::Client::new();
@@ -54,13 +50,15 @@ impl Http {
 
         // get check_point
         state.check_point = match (state.determinism, state.check_point.take()) {
+            // continued-determinism
             (true, Some(check_point)) => {
                 let check_point = {
-                    let (from, till) = (check_point, latest.round);
-                    Self::verify(&client, &state, &endpoint, from, till).await?
+                    let (from, till) = (check_point, latest);
+                    self.verify(&client, &state, from, till).await?
                 };
                 Some(check_point)
             }
+            // reestablish-determinsm
             (true, None) => {
                 let response = {
                     let val = client.get(&make_url!("public", endpoint, 1));
@@ -71,44 +69,126 @@ impl Http {
                     r.into()
                 };
                 let check_point = {
-                    let (from, till) = (r, latest.round);
-                    Self::verify(&client, &state, &endpoint, from, till).await?
+                    let (from, till) = (r, latest);
+                    self.verify(&client, &state, from, till).await?
                 };
                 Some(check_point)
             }
+            // assumed-determinism
             (false, _) if state.secure => Some(latest),
+            // no-determinism
             (false, _) => None,
         };
 
         Ok(state)
     }
 
+    pub(crate) async fn get(
+        &self,
+        mut state: State,
+        round: Option<u128>,
+    ) -> Result<(State, Random)> {
+        let client = reqwest::Client::new();
+
+        let r = match self.do_get(&client, round).await {
+            Ok(r) => Ok(r),
+            err @ Err(_) if round.is_none() => err,
+            Err(err) => {
+                let r = self.do_get(&client, None).await?;
+                let round = round.unwrap_or(0);
+                if round <= r.round {
+                    let msg = format!("get failed for {} {}", round, err);
+                    err_at!(Invalid, msg: msg)
+                } else {
+                    Ok(r)
+                }
+            }
+        }?;
+
+        let (check_point, r) = match (state.check_point.take(), round) {
+            (Some(check_point), Some(round)) if round <= check_point.round => {
+                // just return an earlier random-ness.
+                // TODO: with cache we can optimize this call
+                (check_point, r)
+            }
+            (Some(check_point), Some(_)) if state.secure => {
+                let r = self.verify(&client, &state, check_point, r).await?;
+                (r.clone(), r)
+            }
+            (Some(check_point), Some(_)) => (r.clone(), r),
+            (Some(check_point), None) if state.secure => {
+                let r = self.verify(&client, &state, check_point, r).await?;
+                (r.clone(), r)
+            }
+            (Some(check_point), None) => (r.clone(), r),
+            (None, _) => err_at!(Fatal, msg: format!("unreachable"))?,
+        };
+        state.check_point = Some(check_point);
+
+        Ok((state, r))
+    }
+
     async fn verify(
+        &self,
         client: &reqwest::Client,
         state: &State,
-        endpoint: &str,
         mut latest: Random,
-        till: u128,
+        till: Random,
     ) -> Result<Random> {
-        for round in (latest.round..till).map(|r| r + 1) {
-            let r: Random = {
+        let mut iter = latest.round..till.round;
+        let pk = state.info.public_key.as_slice();
+        loop {
+            match iter.next() {
+                Some(round) if round == latest.round => continue,
+                Some(round) => {
+                    let r = self.do_get(client, Some(round)).await?;
+                    if !util::verify_chain(&pk, &latest, &r)? {
+                        err_at!(Invalid, msg: format!("fail verify {}", r))?;
+                    };
+                    latest = r;
+                }
+                None => {
+                    if !util::verify_chain(&pk, &latest, &till)? {
+                        err_at!(Invalid, msg: format!("fail verify {}", till))?;
+                    }
+                    latest = till;
+                    break;
+                }
+            }
+        }
+
+        Ok(latest)
+    }
+
+    async fn do_get(&self, client: &reqwest::Client, round: Option<u128>) -> Result<Random> {
+        let endpoint = self.to_base_url();
+
+        let r = match round {
+            Some(round) => {
                 let response = {
                     let val = client.get(&make_url!("public", endpoint, round));
                     err_at!(IOError, val.send().await)?
                 };
                 let r: RandomJson = err_at!(Parse, response.json().await)?;
                 r.into()
-            };
+            }
+            None => {
+                let response = {
+                    let val = client.get(&make_url!("public", endpoint));
+                    err_at!(IOError, val.send().await)?
+                };
+                let r: RandomJson = err_at!(Parse, response.json().await)?;
+                r.into()
+            }
+        };
 
-            match util::verify_chain(&state.info.public_key, &latest, &r)? {
-                true => (),
-                false => err_at!(Invalid, msg: format!("fail verify {}", r))?,
-            };
+        Ok(r)
+    }
 
-            latest = r;
+    fn to_base_url(&self) -> String {
+        match self {
+            Http::DrandApi => "https://api.drand.sh".to_string(),
         }
-
-        Ok(latest)
     }
 }
 
@@ -118,26 +198,6 @@ struct InfoJson {
     period: u64,
     genesis_time: u64,
     hash: String,
-}
-
-// Info is from main-net's `/info` endpoint.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct Info {
-    public_key: Vec<u8>,
-    period: time::Duration,
-    genesis_time: time::SystemTime,
-    hash: Vec<u8>,
-}
-
-impl Default for Info {
-    fn default() -> Self {
-        Info {
-            public_key: Vec::default(),
-            period: time::Duration::default(),
-            genesis_time: time::UNIX_EPOCH,
-            hash: Vec::default(),
-        }
-    }
 }
 
 impl From<InfoJson> for Info {
@@ -160,15 +220,6 @@ struct RandomJson {
     previous_signature: String,
 }
 
-// Random is main-net's `/public/latest` and `/public/{round}` endpoints.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct Random {
-    round: u128,
-    randomness: Vec<u8>,
-    signature: Vec<u8>,
-    previous_signature: Vec<u8>,
-}
-
 impl From<RandomJson> for Random {
     fn from(val: RandomJson) -> Self {
         Random {
@@ -176,52 +227,6 @@ impl From<RandomJson> for Random {
             randomness: val.randomness.as_bytes().to_vec(),
             signature: val.signature.as_bytes().to_vec(),
             previous_signature: val.previous_signature.as_bytes().to_vec(),
-        }
-    }
-}
-
-impl fmt::Display for Random {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        write!(f, "Random<{}>", self.round)
-    }
-}
-
-impl Round for Random {
-    fn to_round(&self) -> u128 {
-        self.round
-    }
-
-    fn as_randomness(&self) -> &[u8] {
-        self.randomness.as_slice()
-    }
-
-    fn as_signature(&self) -> &[u8] {
-        self.signature.as_slice()
-    }
-
-    fn as_previous_signature(&self) -> Option<&[u8]> {
-        Some(self.previous_signature.as_slice())
-    }
-
-    fn to_digest(&self) -> Result<Vec<u8>> {
-        let mut hasher = Sha256::default();
-        hasher.update(&self.previous_signature);
-        hasher.update(self.round.to_be_bytes());
-        Ok(hasher.finalize().to_vec())
-    }
-}
-
-impl Random {
-    pub(crate) fn from_round<R: Round>(r: R) -> Self {
-        let previous_signature = match r.as_previous_signature() {
-            Some(bytes) => bytes.to_vec(),
-            None => vec![],
-        };
-        Random {
-            round: r.to_round(),
-            randomness: r.as_randomness().to_vec(),
-            signature: r.as_signature().to_vec(),
-            previous_signature,
         }
     }
 }
