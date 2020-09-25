@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use std::time;
+use std::{fmt, time, result};
 
 use crate::{Config, Error, Result, Round};
 
@@ -78,7 +78,7 @@ impl State {
             let info: InfoJson = err_at!(Parse, response.json().await)?;
             info.into()
         };
-        self.info = Some(info);
+        self.info = Some(info.clone());
 
         // get latest round
         let latest: Random = {
@@ -93,7 +93,10 @@ impl State {
         // get check_point
         self.check_point = match (self.determinism, self.check_point.take()) {
             (true, Some(check_point)) => {
-                let check_point = self.verify(check_point, latest)?;
+                let check_point = {
+                    let (from, till) = (check_point.round, latest.round);
+                    Self::verify(&client, &info, endpoint, from, till).await?
+                };
                 Some(check_point)
             }
             (true, None) => {
@@ -101,8 +104,14 @@ impl State {
                     let val = client.get(&make_url!("public", endpoint, 1));
                     err_at!(IOError, val.send().await)?
                 };
-                let r: RandomJson = err_at!(Parse, response.json().await)?;
-                let check_point = self.verify(r.into(), latest)?;
+                let r: Random = {
+                    let r: RandomJson = err_at!(Parse, response.json().await)?;
+                    r.into()
+                };
+                let check_point = {
+                    let (from, till) = (r.round, latest.round);
+                    Self::verify(&client, &info, endpoint, from, till).await?
+                };
                 Some(check_point)
             }
             (false, _) if self.secure => Some(latest),
@@ -112,8 +121,61 @@ impl State {
         Ok(())
     }
 
-    fn verify(&self, from: Random, till: Random) -> Result<Random> {
-        todo!()
+    async fn verify(
+        client: &reqwest::Client,
+        info: &Info,
+        endpoint: &str,
+        from: u128,
+        till: u128,
+    ) -> Result<Random> {
+        use std::str::from_utf8;
+
+        for round in (from..till).map(|r| r + 1) {
+            let r: Random = {
+                let response = {
+                    let val = client.get(&make_url!("public", endpoint, round));
+                    err_at!(IOError, val.send().await)?
+                };
+                let r: RandomJson = err_at!(Parse, response.json().await)?;
+                r.into()
+            };
+            let psign = match r.previous_signature.as_ref() {
+                Some(psign) => psign,
+                None => err_at!(Invalid, msg: format!("missing prev-signature"))?,
+            };
+
+            let pk = {
+                let s = err_at!(Parse, from_utf8(&info.public_key))?;
+                let mut bytes: [u8; 48] = [0_u8; 48];
+                bytes[..].clone_from_slice(&err_at!(Parse, hex::decode(&s))?);
+                err_at!(Parse, drand_verify::g1_from_fixed(bytes))?
+            };
+            let res = {
+                let psign = err_at!(Parse, hex::decode(&psign))?;
+                let sign = err_at!(Parse, hex::decode(&r.signature))?;
+                err_at!(Invalid, drand_verify::verify(
+                    &pk,
+                    round as u64,
+                    &sign,
+                    &psign,
+                ))?
+            };
+            match res {
+                true => (),
+                false => err_at!(Invalid, msg: format!("fail verify {}", r))?,
+            };
+        }
+
+        let latest: Random = {
+            let response = {
+                let val = client.get(&make_url!("public", endpoint, till));
+                err_at!(IOError, val.send().await)?
+            };
+            let r: RandomJson = err_at!(Parse, response.json().await)?;
+            r.into()
+        };
+
+        Ok(latest)
     }
 }
 
@@ -126,7 +188,7 @@ struct InfoJson {
 }
 
 // Info is from main-net's `/info` endpoint.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct Info {
     public_key: Vec<u8>,
     period: time::Duration,
@@ -155,7 +217,7 @@ struct RandomJson {
 }
 
 // Random is main-net's `/public/latest` and `/public/{round}` endpoints.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct Random {
     round: u128,
     randomness: Vec<u8>,
@@ -171,6 +233,12 @@ impl From<RandomJson> for Random {
             signature: val.signature.as_bytes().to_vec(),
             previous_signature: Some(val.previous_signature.as_bytes().to_vec()),
         }
+    }
+}
+
+impl fmt::Display for Random {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        write!(f, "Random<{}>", self.round)
     }
 }
 
