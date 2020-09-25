@@ -12,3 +12,4 @@ sha2 = "0.9.1"
 reqwest = { version = "0.10.8", features = ["json"] }
 serde = { version = "1.0.116", features = ["derive"] }
 drand-verify = { path = "/home/prataprc/tmp/drand-verify" }
+futures = "0.3.5"

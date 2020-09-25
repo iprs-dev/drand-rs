@@ -1,11 +1,14 @@
 use serde::Deserialize;
 
-use std::time;
+use std::{cmp, time};
 
 use crate::{
     endpoints::{Info, Random, State},
     util, Error, Result,
 };
+
+const MAX_ELAPSED_WINDOW: usize = 32;
+pub(crate) const MAX_ELAPSED: time::Duration = time::Duration::from_secs(3600 * 24);
 
 macro_rules! make_url {
     ("info", $ep:expr) => {
@@ -19,34 +22,65 @@ macro_rules! make_url {
     };
 }
 
+macro_rules! async_get {
+    ($this:ident, $client:ident, $url:expr) => {{
+        let start = time::Instant::now();
+        let res = $client.get($url.as_str()).send().await;
+        match res {
+            Ok(_) => {
+                $this.add_elapsed(start.elapsed());
+            }
+            Err(_) => {
+                let avg = cmp::min($this.avg_elapsed() * 2, MAX_ELAPSED);
+                $this.add_elapsed(avg);
+            }
+        }
+        err_at!(IOError, res)
+    }};
+}
+
+#[derive(Clone)]
 pub(crate) enum Http {
-    DrandApi,
+    DrandApi(Vec<time::Duration>),
 }
 
 impl Http {
-    pub(crate) async fn boot(&self, mut state: State) -> Result<State> {
+    pub(crate) fn new_drand_api() -> Http {
+        Http::DrandApi(Vec::default())
+    }
+
+    pub(crate) fn avg_elapsed(&self) -> time::Duration {
+        let es = match self {
+            Http::DrandApi(es) => es,
+        };
+        match es.len() {
+            0 => time::Duration::from_secs(u64::MAX),
+            n => {
+                let sum: time::Duration = es.iter().sum();
+                sum / (n as u32)
+            }
+        }
+    }
+
+    pub(crate) async fn boot_phase1(&mut self) -> Result<(Info, Random)> {
         let endpoint = self.to_base_url();
         let client = reqwest::Client::new();
 
         // get info
-        state.info = {
-            let response = {
-                let val = client.get(&make_url!("info", endpoint));
-                err_at!(IOError, val.send().await)?
-            };
-            let info: InfoJson = err_at!(Parse, response.json().await)?;
+        let info = {
+            let resp = async_get!(self, client, make_url!("info", endpoint))?;
+            let info: InfoJson = err_at!(Parse, resp.json().await)?;
             info.into()
         };
 
         // get latest round
-        let latest: Random = {
-            let response = {
-                let val = client.get(&make_url!("public", endpoint));
-                err_at!(IOError, val.send().await)?
-            };
-            let r: RandomJson = err_at!(Parse, response.json().await)?;
-            r.into()
-        };
+        let latest = self.do_get(&client, None).await?;
+
+        Ok((info, latest))
+    }
+
+    pub(crate) async fn boot_phase2(&mut self, mut state: State, latest: Random) -> Result<State> {
+        let client = reqwest::Client::new();
 
         // get check_point
         state.check_point = match (state.determinism, state.check_point.take()) {
@@ -54,25 +88,14 @@ impl Http {
             (true, Some(check_point)) => {
                 let check_point = {
                     let (from, till) = (check_point, latest);
-                    self.verify(&client, &state, from, till).await?
+                    self.verify(&state, from, till).await?
                 };
                 Some(check_point)
             }
             // reestablish-determinsm
             (true, None) => {
-                let response = {
-                    let val = client.get(&make_url!("public", endpoint, 1));
-                    err_at!(IOError, val.send().await)?
-                };
-                let r: Random = {
-                    let r: RandomJson = err_at!(Parse, response.json().await)?;
-                    r.into()
-                };
-                let check_point = {
-                    let (from, till) = (r, latest);
-                    self.verify(&client, &state, from, till).await?
-                };
-                Some(check_point)
+                let r = self.do_get(&client, Some(1)).await?;
+                Some(self.verify(&state, r, latest).await?)
             }
             // assumed-determinism
             (false, _) if state.secure => Some(latest),
@@ -84,7 +107,7 @@ impl Http {
     }
 
     pub(crate) async fn get(
-        &self,
+        &mut self,
         mut state: State,
         round: Option<u128>,
     ) -> Result<(State, Random)> {
@@ -112,36 +135,37 @@ impl Http {
                 (check_point, r)
             }
             (Some(check_point), Some(_)) if state.secure => {
-                let r = self.verify(&client, &state, check_point, r).await?;
+                let r = self.verify(&state, check_point, r).await?;
                 (r.clone(), r)
             }
-            (Some(check_point), Some(_)) => (r.clone(), r),
+            (Some(_), Some(_)) => (r.clone(), r),
             (Some(check_point), None) if state.secure => {
-                let r = self.verify(&client, &state, check_point, r).await?;
+                let r = self.verify(&state, check_point, r).await?;
                 (r.clone(), r)
             }
-            (Some(check_point), None) => (r.clone(), r),
-            (None, _) => err_at!(Fatal, msg: format!("unreachable"))?,
+            (Some(_), None) => (r.clone(), r),
+            (None, _) => (r.clone(), r),
         };
         state.check_point = Some(check_point);
 
         Ok((state, r))
     }
 
-    async fn verify(
-        &self,
-        client: &reqwest::Client,
+    pub(crate) async fn verify(
+        &mut self,
         state: &State,
         mut latest: Random,
         till: Random,
     ) -> Result<Random> {
+        let client = reqwest::Client::new();
+
         let mut iter = latest.round..till.round;
         let pk = state.info.public_key.as_slice();
         loop {
             match iter.next() {
                 Some(round) if round == latest.round => continue,
                 Some(round) => {
-                    let r = self.do_get(client, Some(round)).await?;
+                    let r = self.do_get(&client, Some(round)).await?;
                     if !util::verify_chain(&pk, &latest, &r)? {
                         err_at!(Invalid, msg: format!("fail verify {}", r))?;
                     };
@@ -160,24 +184,24 @@ impl Http {
         Ok(latest)
     }
 
-    async fn do_get(&self, client: &reqwest::Client, round: Option<u128>) -> Result<Random> {
+    async fn do_get(&mut self, client: &reqwest::Client, round: Option<u128>) -> Result<Random> {
         let endpoint = self.to_base_url();
 
         let r = match round {
             Some(round) => {
-                let response = {
-                    let val = client.get(&make_url!("public", endpoint, round));
-                    err_at!(IOError, val.send().await)?
+                let resp = {
+                    let url = make_url!("public", endpoint, round);
+                    async_get!(self, client, url)?
                 };
-                let r: RandomJson = err_at!(Parse, response.json().await)?;
+                let r: RandomJson = err_at!(Parse, resp.json().await)?;
                 r.into()
             }
             None => {
-                let response = {
-                    let val = client.get(&make_url!("public", endpoint));
-                    err_at!(IOError, val.send().await)?
+                let resp = {
+                    let url = make_url!("public", endpoint);
+                    async_get!(self, client, url)?
                 };
-                let r: RandomJson = err_at!(Parse, response.json().await)?;
+                let r: RandomJson = err_at!(Parse, resp.json().await)?;
                 r.into()
             }
         };
@@ -187,8 +211,22 @@ impl Http {
 
     fn to_base_url(&self) -> String {
         match self {
-            Http::DrandApi => "https://api.drand.sh".to_string(),
+            Http::DrandApi(_) => "https://api.drand.sh".to_string(),
         }
+    }
+
+    fn add_elapsed(&mut self, elapsed: time::Duration) {
+        let es = match self {
+            Http::DrandApi(es) => es,
+        };
+
+        match es.len() {
+            n if n >= MAX_ELAPSED_WINDOW => {
+                es.remove(0);
+            }
+            _ => (),
+        };
+        es.push(elapsed)
     }
 }
 
