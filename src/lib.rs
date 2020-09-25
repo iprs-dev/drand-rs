@@ -2,7 +2,8 @@ use std::{error, fmt, result, time};
 
 #[macro_use]
 mod util;
-pub mod endpoints;
+mod endpoints;
+mod http;
 
 pub const MAINNET_CHAIN_HASH: &'static str =
     "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce";
@@ -56,7 +57,7 @@ pub trait Round {
     fn as_signature(&self) -> &[u8];
 
     /// Return a reference to signature for the previous round
-    fn as_pervious_signature(&self) -> Option<&[u8]>;
+    fn as_previous_signature(&self) -> Option<&[u8]>;
 
     /// Return the Sha256 digest of round-number and previous_signature
     fn to_digest(&self) -> Result<Vec<u8>>;
