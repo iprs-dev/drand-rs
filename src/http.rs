@@ -1,6 +1,10 @@
 use serde::Deserialize;
 
-use std::{cmp, time};
+use std::{
+    cmp,
+    convert::{TryFrom, TryInto},
+    time,
+};
 
 use crate::{endpoints::State, verify, Error, Info, Random, Result};
 
@@ -70,7 +74,7 @@ impl Http {
                 async_get!(self, client, make_url!("info", endpoint))
             )?;
             let info: InfoJson = err_at!(JsonParse, resp.json().await)?;
-            info.into()
+            info.try_into()?
         };
 
         // confirm whether root-of-trust is as expected.
@@ -101,7 +105,7 @@ impl Http {
                 };
                 Some(check_point)
             }
-            // reestablish-determinsm
+            // reestablish-determinism
             (true, None) => {
                 let r = self.do_get(&client, Some(1)).await?;
                 Some(self.verify(&state, r, latest).await?)
@@ -203,7 +207,7 @@ impl Http {
                     err_at!(IOError, async_get!(self, client, url))?
                 };
                 let r: RandomJson = err_at!(JsonParse, resp.json().await)?;
-                r.into()
+                r.try_into()?
             }
             None => {
                 let resp = {
@@ -211,7 +215,7 @@ impl Http {
                     err_at!(IOError, async_get!(self, client, url))?
                 };
                 let r: RandomJson = err_at!(JsonParse, resp.json().await)?;
-                r.into()
+                r.try_into()?
             }
         };
 
@@ -247,15 +251,19 @@ struct InfoJson {
     hash: String,
 }
 
-impl From<InfoJson> for Info {
-    fn from(val: InfoJson) -> Self {
+impl TryFrom<InfoJson> for Info {
+    type Error = Error;
+
+    fn try_from(val: InfoJson) -> Result<Self> {
         let genesis_time = time::Duration::from_secs(val.genesis_time);
-        Info {
-            public_key: val.public_key.as_bytes().to_vec(),
+        let val = Info {
+            public_key: err_at!(HexParse, hex::decode(&val.public_key))?,
             period: time::Duration::from_secs(val.period),
             genesis_time: time::UNIX_EPOCH + genesis_time,
-            hash: val.hash.as_bytes().to_vec(),
-        }
+            hash: err_at!(HexParse, hex::decode(&val.hash))?,
+        };
+
+        Ok(val)
     }
 }
 
@@ -267,13 +275,18 @@ struct RandomJson {
     previous_signature: String,
 }
 
-impl From<RandomJson> for Random {
-    fn from(val: RandomJson) -> Self {
-        Random {
+impl TryFrom<RandomJson> for Random {
+    type Error = Error;
+
+    fn try_from(val: RandomJson) -> Result<Self> {
+        let psign = err_at!(HexParse, hex::decode(&val.previous_signature))?;
+        let val = Random {
             round: val.round,
-            randomness: val.randomness.as_bytes().to_vec(),
-            signature: val.signature.as_bytes().to_vec(),
-            previous_signature: val.previous_signature.as_bytes().to_vec(),
-        }
+            randomness: err_at!(HexParse, hex::decode(&val.randomness))?,
+            signature: err_at!(HexParse, hex::decode(&val.signature))?,
+            previous_signature: psign,
+        };
+
+        Ok(val)
     }
 }
