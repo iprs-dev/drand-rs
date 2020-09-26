@@ -1,14 +1,40 @@
-use sha2::{Digest, Sha256};
+use std::{future::Future, time};
 
-use std::{fmt, result, time};
+use crate::{client::Endpoint, http::Http, Config, Error, Info, Random, Result};
 
-use crate::{http::Http, Config, Error, Result, Round};
+// State of each endpoint. An endpoint is booted and subsequently
+// used to watch/get future rounds of random-ness.
+#[derive(Clone)]
+pub(crate) struct State {
+    pub(crate) info: Info,
+    pub(crate) check_point: Option<Random>,
+    pub(crate) determinism: bool,
+    pub(crate) secure: bool,
+    pub(crate) rate_limit: usize,
+}
 
-pub enum Endpoint {
-    HttpDrandApi,
-    HttpDrandApi2,
-    HttpDrandApi3,
-    HttpCloudflare,
+impl Default for State {
+    fn default() -> Self {
+        State {
+            info: Info::default(),
+            check_point: None,
+            determinism: bool::default(),
+            secure: bool::default(),
+            rate_limit: usize::default(),
+        }
+    }
+}
+
+impl From<Config> for State {
+    fn from(mut cfg: Config) -> Self {
+        State {
+            info: Info::default(),
+            check_point: cfg.check_point.take(),
+            determinism: cfg.determinism,
+            secure: cfg.secure,
+            rate_limit: cfg.rate_limit,
+        }
+    }
 }
 
 // Endpoints is an enumeration of several known http endpoint from
@@ -19,9 +45,9 @@ pub struct Endpoints {
 }
 
 impl Endpoints {
-    pub(crate) fn new<R: Round>(cfg: Config<R>) -> Self {
+    pub(crate) fn from_config(config: Config) -> Self {
         Endpoints {
-            state: cfg.into(),
+            state: config.into(),
             endpoints: Vec::default(),
         }
     }
@@ -37,82 +63,102 @@ impl Endpoints {
         self
     }
 
-    pub(crate) async fn boot(&mut self) -> Result<()> {
-        let (info, latest) = match self.endpoints.len() {
-            0 => err_at!(Invalid, msg: format!("initialize endpoint"))?,
-            1 => self.endpoints[0].boot_phase1().await?,
-            _ => {
-                let (info, latest) = self.endpoints[0].boot_phase1().await?;
+    pub(crate) fn boot<'a>(
+        &'a mut self,
+        chain_hash: Option<Vec<u8>>,
+    ) -> impl Future<Output = Result<()>> + 'a {
+        async move {
+            // root of trust.
+            let rot = chain_hash.as_ref().map(|x| x.as_slice());
 
-                let mut tail = vec![];
-                for mut endp in self.endpoints[1..].to_vec() {
-                    let (info1, latest1) = (info.clone(), latest.clone());
-                    tail.push(async {
-                        let (info2, _) = endp.boot_phase1().await?;
+            let (info, latest) = match self.endpoints.len() {
+                0 => err_at!(Invalid, msg: format!("initialize endpoint"))?,
+                1 => self.endpoints[0].boot_phase1(rot).await?,
+                _ => {
+                    let (info, latest) = {
+                        let endp = &mut self.endpoints[0];
+                        endp.boot_phase1(rot).await?
+                    };
 
-                        Self::boot_validate_info(info1, info2)?;
+                    let mut tail = vec![];
+                    for mut endp in self.endpoints[1..].to_vec() {
+                        let (info1, latest1) = (info.clone(), latest.clone());
+                        tail.push(async {
+                            let (info2, _) = endp.boot_phase1(rot).await?;
 
-                        let s = {
-                            let mut s = State::default();
-                            s.check_point = None;
-                            s.secure = false;
-                            s
-                        };
-                        let (_, r) = endp.get(s, Some(latest1.round)).await?;
-                        Self::boot_validate_latest(latest1, r)?;
-                        Ok::<Inner, Error>(endp)
-                    })
+                            Self::boot_validate_info(info1, info2)?;
+
+                            let s = {
+                                let mut s = State::default();
+                                s.check_point = None;
+                                s.secure = false;
+                                s
+                            };
+                            let (_, r) = endp.get(s, Some(latest1.round)).await?;
+                            Self::boot_validate_latest(latest1, r)?;
+                            Ok::<Inner, Error>(endp)
+                        })
+                    }
+
+                    futures::future::join_all(tail).await;
+
+                    (info, latest)
                 }
+            };
 
-                futures::future::join_all(tail).await;
+            self.state.info = info;
+            self.state = {
+                let s = self.state.clone();
+                self.endpoints[0].boot_phase2(s, latest).await?
+            };
 
-                (info, latest)
-            }
-        };
-
-        self.state.info = info;
-        self.state = {
-            let s = self.state.clone();
-            self.endpoints[0].boot_phase2(s, latest).await?
-        };
-
-        Ok(())
+            Ok(())
+        }
     }
 
-    pub(crate) async fn get(&mut self, round: Option<u128>) -> Result<Random> {
-        let (state, r) = loop {
-            match self.get_endpoint_pair() {
-                (Some(mut e1), Some(mut e2)) => {
-                    let (res1, res2) = futures::join!(
-                        e1.get(self.state.clone(), round),
-                        e2.get(self.state.clone(), round),
-                    );
-                    match (res1, res2) {
-                        (Ok((s1, r1)), Ok((s2, r2))) => {
-                            if r1.round > r2.round {
-                                break (s1, r1);
-                            } else {
-                                break (s2, r2);
-                            };
-                        }
-                        (Ok((s1, r1)), Err(_)) => break (s1, r1),
-                        (Err(_), Ok((s2, r2))) => break (s2, r2),
-                        (Err(_), Err(_)) => (),
-                    };
+    pub(crate) fn get<'a>(
+        &'a mut self,
+        round: Option<u128>,
+    ) -> impl Future<Output = Result<Random>> + 'a {
+        async move {
+            let (state, r) = loop {
+                match self.get_endpoint_pair() {
+                    (Some(mut e1), Some(mut e2)) => {
+                        let (res1, res2) = futures::join!(
+                            e1.get(self.state.clone(), round),
+                            e2.get(self.state.clone(), round),
+                        );
+                        match (res1, res2) {
+                            (Ok((s1, r1)), Ok((s2, r2))) => {
+                                if r1.round > r2.round {
+                                    break (s1, r1);
+                                } else {
+                                    break (s2, r2);
+                                };
+                            }
+                            (Ok((s1, r1)), Err(_)) => break (s1, r1),
+                            (Err(_), Ok((s2, r2))) => break (s2, r2),
+                            (Err(_), Err(_)) => (),
+                        };
+                    }
+                    (Some(mut e1), None) => {
+                        let (state, r) = e1.get(self.state.clone(), round).await?;
+                        break (state, r);
+                    }
+                    (None, _) => {
+                        let msg = format!("missing/exhausted endpoint");
+                        err_at!(Fatal, msg: msg)?
+                    }
                 }
-                (Some(mut e1), None) => {
-                    let (state, r) = e1.get(self.state.clone(), round).await?;
-                    break (state, r);
-                }
-                (None, _) => {
-                    let msg = format!("missing/exhausted endpoint");
-                    err_at!(Fatal, msg: msg)?
-                }
-            }
-        };
-        self.state = state;
+            };
+            self.state = state;
 
-        Ok(r)
+            Ok(r)
+        }
+    }
+
+    pub(crate) fn to_info(&self) -> Info {
+        self.state.info.clone()
     }
 }
 
@@ -175,9 +221,9 @@ enum Inner {
 }
 
 impl Inner {
-    async fn boot_phase1(&mut self) -> Result<(Info, Random)> {
+    async fn boot_phase1(&mut self, rot: Option<&[u8]>) -> Result<(Info, Random)> {
         match self {
-            Inner::Http(endp) => endp.boot_phase1().await,
+            Inner::Http(endp) => endp.boot_phase1(rot).await,
         }
     }
 
@@ -196,123 +242,6 @@ impl Inner {
     fn avg_elapsed(&self) -> time::Duration {
         match self {
             Inner::Http(endp) => endp.avg_elapsed(),
-        }
-    }
-}
-
-// State of each endpoint. An endpoint is booted and subsequently
-// used to watch/get future rounds of random-ness.
-#[derive(Clone)]
-pub(crate) struct State {
-    pub(crate) info: Info,
-    pub(crate) check_point: Option<Random>,
-    pub(crate) determinism: bool,
-    pub(crate) secure: bool,
-    pub(crate) rate_limit: usize,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        State {
-            info: Info::default(),
-            check_point: None,
-            determinism: bool::default(),
-            secure: bool::default(),
-            rate_limit: usize::default(),
-        }
-    }
-}
-
-impl<R> From<Config<R>> for State
-where
-    R: Round,
-{
-    fn from(mut cfg: Config<R>) -> Self {
-        State {
-            info: Info::default(),
-            check_point: cfg.check_point.take().map(Random::from_round),
-            determinism: cfg.determinism,
-            secure: cfg.secure,
-            rate_limit: cfg.rate_limit,
-        }
-    }
-}
-
-// Info is from main-net's `/info` endpoint.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct Info {
-    pub(crate) public_key: Vec<u8>,
-    pub(crate) period: time::Duration,
-    pub(crate) genesis_time: time::SystemTime,
-    pub(crate) hash: Vec<u8>,
-}
-
-impl Default for Info {
-    fn default() -> Self {
-        Info {
-            public_key: Vec::default(),
-            period: time::Duration::default(),
-            genesis_time: time::UNIX_EPOCH,
-            hash: Vec::default(),
-        }
-    }
-}
-
-// Random is main-net's `/public/latest` and `/public/{round}` endpoints.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct Random {
-    pub(crate) round: u128,
-    pub(crate) randomness: Vec<u8>,
-    pub(crate) signature: Vec<u8>,
-    pub(crate) previous_signature: Vec<u8>,
-}
-
-impl fmt::Display for Random {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        write!(f, "Random<{}>", self.round)
-    }
-}
-
-impl Round for Random {
-    #[inline]
-    fn to_round(&self) -> u128 {
-        self.round
-    }
-
-    #[inline]
-    fn as_randomness(&self) -> &[u8] {
-        self.randomness.as_slice()
-    }
-
-    #[inline]
-    fn as_signature(&self) -> &[u8] {
-        self.signature.as_slice()
-    }
-
-    #[inline]
-    fn as_previous_signature(&self) -> Option<&[u8]> {
-        Some(self.previous_signature.as_slice())
-    }
-
-    fn to_digest(&self) -> Result<Vec<u8>> {
-        let mut hasher = Sha256::default();
-        hasher.update(&self.previous_signature);
-        hasher.update(self.round.to_be_bytes());
-        Ok(hasher.finalize().to_vec())
-    }
-}
-
-impl Random {
-    pub(crate) fn from_round<R: Round>(r: R) -> Self {
-        let previous_signature = match r.as_previous_signature() {
-            Some(bytes) => bytes.to_vec(),
-            None => vec![],
-        };
-        Random {
-            round: r.to_round(),
-            randomness: r.as_randomness().to_vec(),
-            signature: r.as_signature().to_vec(),
-            previous_signature,
         }
     }
 }

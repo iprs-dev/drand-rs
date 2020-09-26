@@ -2,10 +2,7 @@ use serde::Deserialize;
 
 use std::{cmp, time};
 
-use crate::{
-    endpoints::{Info, Random, State},
-    util, Error, Result,
-};
+use crate::{endpoints::State, verify, Error, Info, Random, Result};
 
 const MAX_ELAPSED_WINDOW: usize = 32;
 pub(crate) const MAX_ELAPSED: time::Duration = time::Duration::from_secs(3600 * 24);
@@ -62,16 +59,25 @@ impl Http {
         }
     }
 
-    pub(crate) async fn boot_phase1(&mut self) -> Result<(Info, Random)> {
+    pub(crate) async fn boot_phase1(&mut self, rot: Option<&[u8]>) -> Result<(Info, Random)> {
         let endpoint = self.to_base_url();
         let client = reqwest::Client::new();
 
         // get info
-        let info = {
+        let info: Info = {
             let resp = async_get!(self, client, make_url!("info", endpoint))?;
             let info: InfoJson = err_at!(Parse, resp.json().await)?;
             info.into()
         };
+
+        // confirm whether root-of-trust is as expected.
+        match rot {
+            Some(rot) if rot != info.hash => {
+                let msg = format!("not expected drand-group");
+                err_at!(Invalid, msg: msg)?
+            }
+            _ => (),
+        }
 
         // get latest round
         let latest = self.do_get(&client, None).await?;
@@ -166,13 +172,13 @@ impl Http {
                 Some(round) if round == latest.round => continue,
                 Some(round) => {
                     let r = self.do_get(&client, Some(round)).await?;
-                    if !util::verify_chain(&pk, &latest, &r)? {
+                    if !verify::verify_chain(&pk, &latest, &r)? {
                         err_at!(Invalid, msg: format!("fail verify {}", r))?;
                     };
                     latest = r;
                 }
                 None => {
-                    if !util::verify_chain(&pk, &latest, &till)? {
+                    if !verify::verify_chain(&pk, &latest, &till)? {
                         err_at!(Invalid, msg: format!("fail verify {}", till))?;
                     }
                     latest = till;
