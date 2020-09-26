@@ -38,7 +38,7 @@ impl Client {
 
     pub fn to_info(&self) -> Result<Info> {
         let info = {
-            let inner = err_at!(Fatal, self.inner.lock())?;
+            let inner = err_at!(PoisonedLock, self.inner.lock())?;
             let info = inner.borrow().endpoints.as_ref().unwrap().to_info();
             info
         };
@@ -47,7 +47,7 @@ impl Client {
 
     pub fn add_endpoint(&mut self, endp: Endpoint) -> Result<&mut Self> {
         {
-            let inner = err_at!(Fatal, self.inner.lock())?;
+            let inner = err_at!(PoisonedLock, self.inner.lock())?;
             inner
                 .borrow_mut()
                 .endpoints
@@ -62,7 +62,7 @@ impl Client {
         use futures::executor::block_on;
 
         let fut = async {
-            let inner = err_at!(Fatal, self.inner.lock())?;
+            let inner = err_at!(PoisonedLock, self.inner.lock())?;
             inner
                 .borrow_mut()
                 .endpoints
@@ -79,7 +79,7 @@ impl Client {
         use futures::executor::block_on;
 
         let fut = async {
-            let inner = err_at!(Fatal, self.inner.lock())?;
+            let inner = err_at!(PoisonedLock, self.inner.lock())?;
             let r = inner
                 .borrow_mut()
                 .endpoints
@@ -131,3 +131,7 @@ impl Client {
 //        Ok(Box::new(iter.map(|item| item.map(|r| r.into()))))
 //    }
 //}
+
+#[cfg(test)]
+#[path = "client_test.rs"]
+mod client_test;

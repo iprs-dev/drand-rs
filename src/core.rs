@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 
 use std::{error, fmt, result, time};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Config {
     /// A previously fetched round serving as a verification checkpoint.
     ///
@@ -19,8 +19,6 @@ pub struct Config {
     pub determinism: bool,
     /// Ensure all future rounds from latest round is verified.
     pub secure: bool,
-    /// Rate limit number of request client can make per minute.
-    pub rate_limit: usize,
 }
 
 /// Type alias for Result return type, used by this package.
@@ -32,9 +30,13 @@ pub type Result<T> = result::Result<T, Error>;
 /// error location.
 pub enum Error {
     Fatal(String, String),
+    PoisonedLock(String, String),
+    NotSecure(String, String),
     Invalid(String, String),
     IOError(String, String),
-    Parse(String, String),
+    JsonParse(String, String),
+    StringParse(String, String),
+    HexParse(String, String),
 }
 
 impl fmt::Display for Error {
@@ -43,9 +45,13 @@ impl fmt::Display for Error {
 
         match self {
             Fatal(p, msg) => write!(f, "{} Fatal: {}", p, msg),
+            PoisonedLock(p, msg) => write!(f, "{} PoisonedLock: {}", p, msg),
+            NotSecure(p, msg) => write!(f, "{} NotSecure: {}", p, msg),
             Invalid(p, msg) => write!(f, "{} Invalid: {}", p, msg),
             IOError(p, msg) => write!(f, "{} IOError: {}", p, msg),
-            Parse(p, msg) => write!(f, "{} Parse: {}", p, msg),
+            JsonParse(p, msg) => write!(f, "{} JsonParse: {}", p, msg),
+            StringParse(p, msg) => write!(f, "{} StringParse: {}", p, msg),
+            HexParse(p, msg) => write!(f, "{} HexParse: {}", p, msg),
         }
     }
 }
@@ -59,7 +65,7 @@ impl fmt::Debug for Error {
 impl error::Error for Error {}
 
 // Info is from main-net's `/info` endpoint.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Info {
     pub public_key: Vec<u8>,
     pub period: time::Duration,
@@ -79,7 +85,7 @@ impl Default for Info {
 }
 
 // Random is main-net's `/public/latest` and `/public/{round}` endpoints.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Random {
     pub round: u128,
     pub randomness: Vec<u8>,

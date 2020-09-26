@@ -32,7 +32,7 @@ macro_rules! async_get {
                 $this.add_elapsed(avg);
             }
         }
-        err_at!(IOError, res)
+        res
     }};
 }
 
@@ -65,8 +65,11 @@ impl Http {
 
         // get info
         let info: Info = {
-            let resp = async_get!(self, client, make_url!("info", endpoint))?;
-            let info: InfoJson = err_at!(Parse, resp.json().await)?;
+            let resp = err_at!(
+                IOError,
+                async_get!(self, client, make_url!("info", endpoint))
+            )?;
+            let info: InfoJson = err_at!(JsonParse, resp.json().await)?;
             info.into()
         };
 
@@ -74,7 +77,7 @@ impl Http {
         match rot {
             Some(rot) if rot != info.hash => {
                 let msg = format!("not expected drand-group");
-                err_at!(Invalid, msg: msg)?
+                err_at!(NotSecure, msg: msg)?
             }
             _ => (),
         }
@@ -127,7 +130,7 @@ impl Http {
                 let round = round.unwrap_or(0);
                 if round <= r.round {
                     let msg = format!("get failed for {} {}", round, err);
-                    err_at!(Invalid, msg: msg)
+                    err_at!(IOError, msg: msg)
                 } else {
                     Ok(r)
                 }
@@ -173,13 +176,13 @@ impl Http {
                 Some(round) => {
                     let r = self.do_get(&client, Some(round)).await?;
                     if !verify::verify_chain(&pk, &latest, &r)? {
-                        err_at!(Invalid, msg: format!("fail verify {}", r))?;
+                        err_at!(NotSecure, msg: format!("fail verify {}", r))?;
                     };
                     latest = r;
                 }
                 None => {
                     if !verify::verify_chain(&pk, &latest, &till)? {
-                        err_at!(Invalid, msg: format!("fail verify {}", till))?;
+                        err_at!(NotSecure, msg: format!("fail verify {}", till))?;
                     }
                     latest = till;
                     break;
@@ -197,17 +200,17 @@ impl Http {
             Some(round) => {
                 let resp = {
                     let url = make_url!("public", endpoint, round);
-                    async_get!(self, client, url)?
+                    err_at!(IOError, async_get!(self, client, url))?
                 };
-                let r: RandomJson = err_at!(Parse, resp.json().await)?;
+                let r: RandomJson = err_at!(JsonParse, resp.json().await)?;
                 r.into()
             }
             None => {
                 let resp = {
                     let url = make_url!("public", endpoint);
-                    async_get!(self, client, url)?
+                    err_at!(IOError, async_get!(self, client, url))?
                 };
-                let r: RandomJson = err_at!(Parse, resp.json().await)?;
+                let r: RandomJson = err_at!(JsonParse, resp.json().await)?;
                 r.into()
             }
         };
