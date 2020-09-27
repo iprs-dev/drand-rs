@@ -193,8 +193,8 @@ impl Endpoints {
 
         let mut endpoints = vec![];
         for (i, endp) in self.endpoints.iter().enumerate() {
-            if endp.avg_elapsed() < MAX_ELAPSED {
-                endpoints.push((i, endp.avg_elapsed()));
+            if endp.to_elapsed() < MAX_ELAPSED {
+                endpoints.push((i, endp.to_elapsed()));
             }
         }
         endpoints.sort_by(|x, y| x.1.cmp(&y.1));
@@ -240,9 +240,9 @@ impl Inner {
         }
     }
 
-    fn avg_elapsed(&self) -> time::Duration {
+    fn to_elapsed(&self) -> time::Duration {
         match self {
-            Inner::Http(endp) => endp.avg_elapsed(),
+            Inner::Http(endp) => endp.to_elapsed(),
         }
     }
 }

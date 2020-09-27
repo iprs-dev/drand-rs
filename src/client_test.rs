@@ -29,11 +29,6 @@ fn test_client_1_assumed_determinism() {
 }
 
 #[test]
-fn test_client_1_assumed_determinism() {
-    todo!()
-}
-
-#[test]
 fn test_client_1_reestablish_determinism() {
     todo!()
 }

@@ -8,7 +8,8 @@ use std::{
 
 use crate::{endpoints::State, verify, Error, Info, Random, Result};
 
-const MAX_ELAPSED_WINDOW: usize = 32;
+pub(crate) const MAX_ELAPSED_WINDOW: usize = 32;
+
 pub(crate) const MAX_ELAPSED: time::Duration = time::Duration::from_secs(3600 * 24);
 
 macro_rules! make_url {
@@ -32,7 +33,7 @@ macro_rules! async_get {
                 $this.add_elapsed(start.elapsed());
             }
             Err(_) => {
-                let avg = cmp::min($this.avg_elapsed() * 2, MAX_ELAPSED);
+                let avg = cmp::min($this.to_elapsed() * 2, MAX_ELAPSED);
                 $this.add_elapsed(avg);
             }
         }
@@ -50,7 +51,7 @@ impl Http {
         Http::DrandApi(Vec::default())
     }
 
-    pub(crate) fn avg_elapsed(&self) -> time::Duration {
+    pub(crate) fn to_elapsed(&self) -> time::Duration {
         let es = match self {
             Http::DrandApi(es) => es,
         };
@@ -249,6 +250,8 @@ struct InfoJson {
     period: u64,
     genesis_time: u64,
     hash: String,
+    #[serde(alias = "groupHash")] // TODO: ask this to drand/drand community.
+    group_hash: String,
 }
 
 impl TryFrom<InfoJson> for Info {
@@ -261,6 +264,7 @@ impl TryFrom<InfoJson> for Info {
             period: time::Duration::from_secs(val.period),
             genesis_time: time::UNIX_EPOCH + genesis_time,
             hash: err_at!(HexParse, hex::decode(&val.hash))?,
+            group_hash: err_at!(HexParse, hex::decode(&val.group_hash))?,
         };
 
         Ok(val)
@@ -290,3 +294,7 @@ impl TryFrom<RandomJson> for Random {
         Ok(val)
     }
 }
+
+#[cfg(test)]
+#[path = "http_test.rs"]
+mod http_test;
