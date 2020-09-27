@@ -1,27 +1,27 @@
+// TODO: use github version of drand-verify, not the local version.
+
 use crate::{Error, Random, Result};
 
-pub(crate) fn verify_chain(pk: &[u8], prev: &Random, curr: &Random) -> Result<bool> {
-    use std::str::from_utf8;
-
-    let psign = &curr.previous_signature;
-
-    if &prev.signature != psign {
-        let (s, p) = (&prev.signature, psign);
+pub(crate) fn verify_chain(pk: &[u8], previous_signature: &[u8], curr: &Random) -> Result<bool> {
+    if previous_signature != curr.previous_signature.as_slice() {
+        let s = hex::encode(previous_signature);
+        let p = hex::encode(&curr.previous_signature);
         // TODO: display as hex.
         err_at!(NotSecure, msg: format!("mismatch chain {:?} != {:?}", s, p))?
     }
 
     let pk = {
         let mut bytes: [u8; 48] = [0_u8; 48];
-        let s = err_at!(StringParse, from_utf8(&pk))?;
-        bytes[..].clone_from_slice(&err_at!(HexParse, hex::decode(&s))?);
+        bytes[..].clone_from_slice(&pk);
         err_at!(NotSecure, drand_verify::g1_from_fixed(bytes))?
     };
 
-    let psign = err_at!(HexParse, hex::decode(psign))?;
-    let sign = err_at!(HexParse, hex::decode(&curr.signature))?;
     Ok(err_at!(
         NotSecure,
-        drand_verify::verify(&pk, curr.round as u64, &sign, &psign)
+        drand_verify::verify(&pk, curr.round as u64, &previous_signature, &curr.signature)
     )?)
 }
+
+#[cfg(test)]
+#[path = "verify_test.rs"]
+mod verify_test;

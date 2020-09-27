@@ -17,6 +17,7 @@ pub enum Endpoint {
 }
 
 pub struct Client {
+    name: String,
     inner: Arc<Mutex<RefCell<InnerClient>>>,
 }
 
@@ -26,12 +27,13 @@ struct InnerClient {
 }
 
 impl Client {
-    pub fn from_config(config: Config) -> Client {
+    pub fn from_config(name: &str, config: Config) -> Client {
         let inner = InnerClient {
             _config: config.clone(),
-            endpoints: Some(Endpoints::from_config(config)),
+            endpoints: Some(Endpoints::from_config(name, config)),
         };
         Client {
+            name: name.to_string(),
             inner: Arc::new(Mutex::new(RefCell::new(inner))),
         }
     }
@@ -43,6 +45,10 @@ impl Client {
             info
         };
         Ok(info)
+    }
+
+    pub fn to_name(&self) -> String {
+        self.name.clone()
     }
 
     pub fn add_endpoint(&mut self, endp: Endpoint) -> Result<&mut Self> {

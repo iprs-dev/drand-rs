@@ -1,3 +1,6 @@
+// TODO: Is it okay to use http calls to the league network in
+// unit-test case ? Or should we use a mock server ?
+
 use super::*;
 
 #[test]
@@ -78,4 +81,37 @@ fn test_do_get() {
         hex::encode(r.previous_signature),
         "176f93498eac9ca337150b46d21dd58673ea4e3581185f869672e59fa4cb390a"
     );
+}
+
+#[test]
+fn test_boot_phase1() {
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let mut endp = Http::new_drand_api();
+
+    let (info, _) = rt.block_on(endp.boot_phase1(None, None)).unwrap();
+    assert_eq!(
+        hex::encode(info.hash),
+        "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce"
+    );
+    assert_eq!(
+        hex::encode(info.group_hash),
+        "176f93498eac9ca337150b46d21dd58673ea4e3581185f869672e59fa4cb390a"
+    );
+
+    // root-of-trust
+    let rot =
+        hex::decode("8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce").unwrap();
+    let (info, _) = rt.block_on(endp.boot_phase1(Some(&rot), None)).unwrap();
+    assert_eq!(
+        hex::encode(info.hash.clone()),
+        "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce"
+    );
+    assert_eq!(
+        hex::encode(info.group_hash),
+        "176f93498eac9ca337150b46d21dd58673ea4e3581185f869672e59fa4cb390a"
+    );
+
+    // invlaid root-of-trust
+    let rot = &info.hash[1..];
+    assert!(rt.block_on(endp.boot_phase1(Some(rot), None)).is_err());
 }

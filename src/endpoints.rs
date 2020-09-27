@@ -1,6 +1,6 @@
 use std::time;
 
-use crate::{client::Endpoint, http::Http, Config, Error, Info, Random, Result};
+use crate::{client::Endpoint, core::MAX_CONNS, http::Http, Config, Error, Info, Random, Result};
 
 // State of each endpoint. An endpoint is booted and subsequently
 // used to watch/get future rounds of random-ness.
@@ -10,6 +10,7 @@ pub(crate) struct State {
     pub(crate) check_point: Option<Random>,
     pub(crate) determinism: bool,
     pub(crate) secure: bool,
+    pub(crate) max_conns: u32,
 }
 
 impl Default for State {
@@ -19,6 +20,7 @@ impl Default for State {
             check_point: None,
             determinism: bool::default(),
             secure: bool::default(),
+            max_conns: MAX_CONNS,
         }
     }
 }
@@ -30,6 +32,7 @@ impl From<Config> for State {
             check_point: cfg.check_point.take(),
             determinism: cfg.determinism,
             secure: cfg.secure,
+            max_conns: cfg.max_conns,
         }
     }
 }
@@ -37,24 +40,39 @@ impl From<Config> for State {
 // Endpoints is an enumeration of several known http endpoint from
 // main-net.
 pub struct Endpoints {
+    name: String,
     state: State,
     endpoints: Vec<Inner>,
 }
 
 impl Endpoints {
-    pub(crate) fn from_config(config: Config) -> Self {
+    pub(crate) fn from_config(name: &str, config: Config) -> Self {
         Endpoints {
+            name: name.to_string(),
             state: config.into(),
             endpoints: Vec::default(),
         }
     }
 
     pub(crate) fn add_endpoint(&mut self, endp: Endpoint) -> &mut Self {
+        let name = self.name.to_string();
         let endp = match endp {
-            Endpoint::HttpDrandApi => Inner::Http(Http::new_drand_api()),
-            Endpoint::HttpDrandApi2 => Inner::Http(Http::new_drand_api()),
-            Endpoint::HttpDrandApi3 => Inner::Http(Http::new_drand_api()),
-            Endpoint::HttpCloudflare => Inner::Http(Http::new_drand_api()),
+            Endpoint::HttpDrandApi => {
+                let endp = Http::new_drand_api();
+                Inner::Http { name, endp }
+            }
+            Endpoint::HttpDrandApi2 => {
+                let endp = Http::new_drand_api();
+                Inner::Http { name, endp }
+            }
+            Endpoint::HttpDrandApi3 => {
+                let endp = Http::new_drand_api();
+                Inner::Http { name, endp }
+            }
+            Endpoint::HttpCloudflare => {
+                let endp = Http::new_drand_api();
+                Inner::Http { name, endp }
+            }
         };
         self.endpoints.push(endp);
         self
@@ -63,7 +81,6 @@ impl Endpoints {
     pub(crate) async fn boot(&mut self, chain_hash: Option<Vec<u8>>) -> Result<()> {
         // root of trust.
         let rot = chain_hash.as_ref().map(|x| x.as_slice());
-
         let (info, latest) = match self.endpoints.len() {
             0 => err_at!(Invalid, msg: format!("initialize endpoint"))?,
             1 => self.endpoints[0].boot_phase1(rot).await?,
@@ -218,31 +235,45 @@ impl Endpoints {
 
 #[derive(Clone)]
 enum Inner {
-    Http(Http),
+    Http { name: String, endp: Http },
 }
 
 impl Inner {
     async fn boot_phase1(&mut self, rot: Option<&[u8]>) -> Result<(Info, Random)> {
+        let agent = self.user_agent();
         match self {
-            Inner::Http(endp) => endp.boot_phase1(rot).await,
+            Inner::Http { endp, .. } => endp.boot_phase1(rot, agent).await,
         }
     }
 
     async fn boot_phase2(&mut self, state: State, latest: Random) -> Result<State> {
+        let agent = self.user_agent();
         match self {
-            Inner::Http(endp) => endp.boot_phase2(state, latest).await,
+            Inner::Http { endp, .. } => endp.boot_phase2(state, latest, agent).await,
         }
     }
 
     async fn get(&mut self, state: State, round: Option<u128>) -> Result<(State, Random)> {
+        let agent = self.user_agent();
         match self {
-            Inner::Http(endp) => endp.get(state, round).await,
+            Inner::Http { endp, .. } => endp.get(state, round, agent).await,
         }
     }
 
     fn to_elapsed(&self) -> time::Duration {
         match self {
-            Inner::Http(endp) => endp.to_elapsed(),
+            Inner::Http { endp, .. } => endp.to_elapsed(),
+        }
+    }
+
+    fn user_agent(&self) -> Option<reqwest::header::HeaderValue> {
+        use reqwest::header::HeaderValue;
+
+        match self {
+            Inner::Http { name, .. } => {
+                let agent = format!("drand-rs-{}", name);
+                HeaderValue::from_str(&agent).ok()
+            }
         }
     }
 }

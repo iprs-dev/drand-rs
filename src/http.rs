@@ -64,9 +64,13 @@ impl Http {
         }
     }
 
-    pub(crate) async fn boot_phase1(&mut self, rot: Option<&[u8]>) -> Result<(Info, Random)> {
+    pub(crate) async fn boot_phase1(
+        &mut self,
+        rot: Option<&[u8]>,
+        agent: Option<reqwest::header::HeaderValue>,
+    ) -> Result<(Info, Random)> {
         let endpoint = self.to_base_url();
-        let client = reqwest::Client::new();
+        let client = new_http_client(agent.clone())?;
 
         // get info
         let info: Info = {
@@ -93,8 +97,13 @@ impl Http {
         Ok((info, latest))
     }
 
-    pub(crate) async fn boot_phase2(&mut self, mut state: State, latest: Random) -> Result<State> {
-        let client = reqwest::Client::new();
+    pub(crate) async fn boot_phase2(
+        &mut self,
+        mut state: State,
+        latest: Random,
+        agent: Option<reqwest::header::HeaderValue>,
+    ) -> Result<State> {
+        let client = new_http_client(agent.clone())?;
 
         // get check_point
         state.check_point = match (state.determinism, state.check_point.take()) {
@@ -102,14 +111,14 @@ impl Http {
             (true, Some(check_point)) => {
                 let check_point = {
                     let (from, till) = (check_point, latest);
-                    self.verify(&state, from, till).await?
+                    self.verify(&state, from, till, agent.clone()).await?
                 };
                 Some(check_point)
             }
             // reestablish-determinism
             (true, None) => {
                 let r = self.do_get(&client, Some(1)).await?;
-                Some(self.verify(&state, r, latest).await?)
+                Some(self.verify(&state, r, latest, agent.clone()).await?)
             }
             // assumed-determinism
             (false, _) if state.secure => Some(latest),
@@ -124,40 +133,33 @@ impl Http {
         &mut self,
         mut state: State,
         round: Option<u128>,
+        agent: Option<reqwest::header::HeaderValue>,
     ) -> Result<(State, Random)> {
-        let client = reqwest::Client::new();
+        let client = new_http_client(agent.clone())?;
 
-        let r = match self.do_get(&client, round).await {
-            Ok(r) => Ok(r),
-            err @ Err(_) if round.is_none() => err,
-            Err(err) => {
-                let r = self.do_get(&client, None).await?;
-                let round = round.unwrap_or(0);
-                if round <= r.round {
-                    let msg = format!("get failed for {} {}", round, err);
-                    err_at!(IOError, msg: msg)
-                } else {
-                    Ok(r)
-                }
-            }
-        }?;
+        let r = self.do_get(&client, round).await?;
 
         let (check_point, r) = match (state.check_point.take(), round) {
+            // just return an earlier random-ness.
             (Some(check_point), Some(round)) if round <= check_point.round => {
-                // just return an earlier random-ness.
                 // TODO: with cache we can optimize this call
                 (check_point, r)
             }
+            // return a verified randomness, requested round
             (Some(check_point), Some(_)) if state.secure => {
-                let r = self.verify(&state, check_point, r).await?;
+                let r = self.verify(&state, check_point, r, agent.clone()).await?;
                 (r.clone(), r)
             }
+            // return insecure randomness, requested round
             (Some(_), Some(_)) => (r.clone(), r),
+            // return a verified randomness, latest round
             (Some(check_point), None) if state.secure => {
-                let r = self.verify(&state, check_point, r).await?;
+                let r = self.verify(&state, check_point, r, agent.clone()).await?;
                 (r.clone(), r)
             }
+            // return insecure randomness, latest round
             (Some(_), None) => (r.clone(), r),
+            // return unverified and insecure randomness
             (None, _) => (r.clone(), r),
         };
         state.check_point = Some(check_point);
@@ -170,35 +172,41 @@ impl Http {
         state: &State,
         mut latest: Random,
         till: Random,
+        agent: Option<reqwest::header::HeaderValue>,
     ) -> Result<Random> {
-        let client = reqwest::Client::new();
+        let client = new_http_client(agent.clone())?;
 
         let mut iter = latest.round..till.round;
         let pk = state.info.public_key.as_slice();
-        loop {
-            match iter.next() {
+        latest = loop {
+            latest = match iter.next() {
                 Some(round) if round == latest.round => continue,
                 Some(round) => {
+                    let ps = &latest.previous_signature;
                     let r = self.do_get(&client, Some(round)).await?;
-                    if !verify::verify_chain(&pk, &latest, &r)? {
+                    if !verify::verify_chain(&pk, &ps, &r)? {
                         err_at!(NotSecure, msg: format!("fail verify {}", r))?;
                     };
-                    latest = r;
+                    r
                 }
                 None => {
-                    if !verify::verify_chain(&pk, &latest, &till)? {
+                    let ps = &latest.previous_signature;
+                    if !verify::verify_chain(&pk, &ps, &till)? {
                         err_at!(NotSecure, msg: format!("fail verify {}", till))?;
                     }
-                    latest = till;
-                    break;
+                    break till;
                 }
-            }
-        }
+            };
+        };
 
         Ok(latest)
     }
 
-    async fn do_get(&mut self, client: &reqwest::Client, round: Option<u128>) -> Result<Random> {
+    pub(crate) async fn do_get(
+        &mut self,
+        client: &reqwest::Client,
+        round: Option<u128>,
+    ) -> Result<Random> {
         let endpoint = self.to_base_url();
 
         let r = match round {
@@ -293,6 +301,15 @@ impl TryFrom<RandomJson> for Random {
 
         Ok(val)
     }
+}
+
+fn new_http_client(agent: Option<reqwest::header::HeaderValue>) -> Result<reqwest::Client> {
+    let b = reqwest::Client::builder();
+    let b = match agent {
+        Some(agent) => b.user_agent(agent),
+        None => b,
+    };
+    err_at!(Invalid, b.build(), format!("http builder"))
 }
 
 #[cfg(test)]

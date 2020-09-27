@@ -2,13 +2,8 @@ use super::*;
 
 #[test]
 fn test_client_empty_endpoint() {
-    let config = Config {
-        check_point: None,
-        determinism: false,
-        secure: false,
-    };
-
-    let mut client = Client::from_config(config);
+    let config = Config::default();
+    let mut client = Client::from_config("test", config);
 
     assert!(client.to_info().is_ok());
     assert!(client.boot(None).is_err());
