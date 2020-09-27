@@ -39,7 +39,7 @@ impl From<Config> for State {
 
 // Endpoints is an enumeration of several known http endpoint from
 // main-net.
-pub struct Endpoints {
+pub(crate) struct Endpoints {
     name: String,
     state: State,
     endpoints: Vec<Inner>,
@@ -230,6 +230,18 @@ impl Endpoints {
             }
             (None, _) => (None, None),
         }
+    }
+
+    fn active_endpoints(&self) -> Vec<usize> {
+        use crate::http::MAX_ELAPSED;
+
+        let mut endpoints = vec![];
+        for (i, endp) in self.endpoints.iter().enumerate() {
+            if endp.to_elapsed() < MAX_ELAPSED {
+                endpoints.push(i)
+            }
+        }
+        enpoints
     }
 }
 

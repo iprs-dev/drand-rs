@@ -9,6 +9,7 @@ use std::{
 
 use crate::{endpoints::Endpoints, Config, Error, Info, Random, Result};
 
+#[derive(Clone)]
 pub enum Endpoint {
     HttpDrandApi,
     HttpDrandApi2,
