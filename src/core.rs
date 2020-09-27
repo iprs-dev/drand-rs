@@ -2,6 +2,8 @@ use sha2::{Digest, Sha256};
 
 use std::{error, fmt, result, time};
 
+pub const MAX_CONNS: u32 = 4;
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// A previously fetched round serving as a verification checkpoint.
@@ -14,11 +16,54 @@ pub struct Config {
     ///   round.
     /// * if `secure` is true, every new round is verified with
     ///   `check_point` round.
+    ///
+    /// Default: None
     pub check_point: Option<Random>,
     /// Ensure all rounds from check_point to the latest round is valid
+    ///
+    /// Default: false,
     pub determinism: bool,
     /// Ensure all future rounds from latest round is verified.
+    ///
+    /// Default: false
     pub secure: bool,
+    /// Maximum number of concurrent connections allowed per remote.
+    ///
+    /// Default: MAX_CONNS
+    pub max_conns: u32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            check_point: None,
+            determinism: false,
+            secure: false,
+            max_conns: MAX_CONNS,
+        }
+    }
+}
+
+impl Config {
+    pub fn set_check_point(&mut self, check_point: Option<Random>) -> &mut Self {
+        self.check_point = check_point;
+        self
+    }
+
+    pub fn set_determinism(&mut self, determinism: bool) -> &mut Self {
+        self.determinism = determinism;
+        self
+    }
+
+    pub fn set_secure(&mut self, secure: bool) -> &mut Self {
+        self.secure = secure;
+        self
+    }
+
+    pub fn set_max_conns(&mut self, max_conns: u32) -> &mut Self {
+        self.max_conns = max_conns;
+        self
+    }
 }
 
 /// Type alias for Result return type, used by this package.
@@ -71,6 +116,7 @@ pub struct Info {
     pub period: time::Duration,
     pub genesis_time: time::SystemTime,
     pub hash: Vec<u8>,
+    pub group_hash: Vec<u8>,
 }
 
 impl Default for Info {
@@ -80,6 +126,7 @@ impl Default for Info {
             period: time::Duration::default(),
             genesis_time: time::UNIX_EPOCH,
             hash: Vec::default(),
+            group_hash: Vec::default(),
         }
     }
 }
