@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 
 use std::{error, fmt, result, time};
 
-pub const MAX_CONNS: u32 = 4;
+pub const MAX_CONNS: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -30,7 +30,7 @@ pub struct Config {
     /// Maximum number of concurrent connections allowed per remote.
     ///
     /// Default: MAX_CONNS
-    pub max_conns: u32,
+    pub max_conns: usize,
 }
 
 impl Default for Config {
@@ -60,7 +60,7 @@ impl Config {
         self
     }
 
-    pub fn set_max_conns(&mut self, max_conns: u32) -> &mut Self {
+    pub fn set_max_conns(&mut self, max_conns: usize) -> &mut Self {
         self.max_conns = max_conns;
         self
     }

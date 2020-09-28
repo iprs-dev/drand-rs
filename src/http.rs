@@ -6,7 +6,7 @@ use std::{
     time,
 };
 
-use crate::{endpoints::State, verify, Error, Info, Random, Result};
+use crate::{core::MAX_CONNS, endpoints::State, verify, Error, Info, Random, Result};
 
 pub(crate) const MAX_ELAPSED_WINDOW: usize = 32;
 
@@ -25,19 +25,26 @@ macro_rules! make_url {
 }
 
 macro_rules! async_get {
-    ($this:ident, $client:ident, $url:expr) => {{
+    ($client:ident, $url:expr) => {{
         let start = time::Instant::now();
         let res = $client.get($url.as_str()).send().await;
-        match res {
-            Ok(_) => {
-                $this.add_elapsed(start.elapsed());
+        (res, start.elapsed())
+    }};
+}
+
+macro_rules! add_elapsed {
+    ($this:ident, $res:expr, $elapsed:expr) => {{
+        match $res {
+            Ok(val) => {
+                $this.add_elapsed($elapsed);
+                val
             }
-            Err(_) => {
-                let avg = cmp::min($this.to_elapsed() * 2, MAX_ELAPSED);
-                $this.add_elapsed(avg);
+            err @ Err(_) => {
+                let elapsed = cmp::min($this.to_elapsed() * 2, MAX_ELAPSED);
+                $this.add_elapsed(elapsed);
+                err_at!(IOError, err)?
             }
         }
-        res
     }};
 }
 
@@ -64,20 +71,41 @@ impl Http {
         }
     }
 
+    fn to_base_url(&self) -> String {
+        match self {
+            Http::DrandApi(_) => "https://api.drand.sh".to_string(),
+        }
+    }
+
+    fn add_elapsed(&mut self, elapsed: time::Duration) {
+        let es = match self {
+            Http::DrandApi(es) => es,
+        };
+
+        match es.len() {
+            n if n >= MAX_ELAPSED_WINDOW => {
+                es.remove(0);
+            }
+            _ => (),
+        };
+        es.push(elapsed);
+    }
+
     pub(crate) async fn boot_phase1(
         &mut self,
         rot: Option<&[u8]>,
         agent: Option<reqwest::header::HeaderValue>,
     ) -> Result<(Info, Random)> {
         let endpoint = self.to_base_url();
-        let client = new_http_client(agent.clone())?;
+        let client = new_http_client(MAX_CONNS, agent.clone())?;
 
         // get info
         let info: Info = {
-            let resp = err_at!(
-                IOError,
-                async_get!(self, client, make_url!("info", endpoint))
-            )?;
+            let (res, elapsed) = {
+                let url = make_url!("info", endpoint);
+                async_get!(client, url)
+            };
+            let resp = add_elapsed!(self, res, elapsed);
             let info: InfoJson = err_at!(JsonParse, resp.json().await)?;
             info.try_into()?
         };
@@ -103,7 +131,7 @@ impl Http {
         latest: Random,
         agent: Option<reqwest::header::HeaderValue>,
     ) -> Result<State> {
-        let client = new_http_client(agent.clone())?;
+        let client = new_http_client(MAX_CONNS, agent.clone())?;
 
         // get check_point
         state.check_point = match (state.determinism, state.check_point.take()) {
@@ -135,7 +163,7 @@ impl Http {
         round: Option<u128>,
         agent: Option<reqwest::header::HeaderValue>,
     ) -> Result<(State, Random)> {
-        let client = new_http_client(agent.clone())?;
+        let client = new_http_client(MAX_CONNS, agent.clone())?;
 
         let r = self.do_get(&client, round).await?;
 
@@ -170,36 +198,56 @@ impl Http {
     pub(crate) async fn verify(
         &mut self,
         state: &State,
-        mut latest: Random,
+        mut prev: Random,
         till: Random,
         agent: Option<reqwest::header::HeaderValue>,
     ) -> Result<Random> {
-        let client = new_http_client(agent.clone())?;
-
-        let mut iter = latest.round..till.round;
+        let endpoint = self.to_base_url();
+        let client = new_http_client(state.max_conns, agent.clone())?;
         let pk = state.info.public_key.as_slice();
-        latest = loop {
-            latest = match iter.next() {
-                Some(round) if round == latest.round => continue,
-                Some(round) => {
-                    let ps = &latest.previous_signature;
-                    let r = self.do_get(&client, Some(round)).await?;
-                    if !verify::verify_chain(&pk, &ps, &r)? {
-                        err_at!(NotSecure, msg: format!("fail verify {}", r))?;
-                    };
-                    r
-                }
-                None => {
-                    let ps = &latest.previous_signature;
-                    if !verify::verify_chain(&pk, &ps, &till)? {
-                        err_at!(NotSecure, msg: format!("fail verify {}", till))?;
-                    }
-                    break till;
-                }
-            };
-        };
 
-        Ok(latest)
+        while prev.round < till.round {
+            let till_round = cmp::min(prev.round + 1000, till.round);
+
+            let mut rounds = vec![];
+            for round in (prev.round + 1)..till_round {
+                let url = make_url!("public", endpoint, round);
+                let client = &client;
+                rounds.push(async move {
+                    let (res, elapsed) = { async_get!(client, url) };
+                    let resp = err_at!(IOError, res)?;
+                    let r: RandomJson = err_at!(JsonParse, resp.json().await)?;
+                    let r: Random = r.try_into()?;
+                    Ok::<(Random, time::Duration), Error>((r, elapsed))
+                });
+            }
+
+            let mut err = false;
+            for item in futures::future::join_all(rounds).await {
+                let random = match item {
+                    Ok((_, elapsed)) if err => {
+                        self.add_elapsed(elapsed);
+                        continue;
+                    }
+                    Ok((r, elapsed)) => {
+                        self.add_elapsed(elapsed);
+                        r
+                    }
+                    Err(_) => {
+                        let elapsed = cmp::min(self.to_elapsed() * 2, MAX_ELAPSED);
+                        self.add_elapsed(elapsed);
+                        err = true;
+                        continue;
+                    }
+                };
+                if !verify::verify_chain(&pk, &prev.signature, &random)? {
+                    err_at!(NotSecure, msg: format!("fail verify {}", random))?;
+                }
+                prev = random;
+            }
+        }
+
+        Ok(till)
     }
 
     pub(crate) async fn do_get(
@@ -211,44 +259,26 @@ impl Http {
 
         let r = match round {
             Some(round) => {
-                let resp = {
+                let (res, elapsed) = {
                     let url = make_url!("public", endpoint, round);
-                    err_at!(IOError, async_get!(self, client, url))?
+                    async_get!(client, url)
                 };
+                let resp = add_elapsed!(self, res, elapsed);
                 let r: RandomJson = err_at!(JsonParse, resp.json().await)?;
                 r.try_into()?
             }
             None => {
-                let resp = {
+                let (res, elapsed) = {
                     let url = make_url!("public", endpoint);
-                    err_at!(IOError, async_get!(self, client, url))?
+                    async_get!(client, url)
                 };
+                let resp = add_elapsed!(self, res, elapsed);
                 let r: RandomJson = err_at!(JsonParse, resp.json().await)?;
                 r.try_into()?
             }
         };
 
         Ok(r)
-    }
-
-    fn to_base_url(&self) -> String {
-        match self {
-            Http::DrandApi(_) => "https://api.drand.sh".to_string(),
-        }
-    }
-
-    fn add_elapsed(&mut self, elapsed: time::Duration) {
-        let es = match self {
-            Http::DrandApi(es) => es,
-        };
-
-        match es.len() {
-            n if n >= MAX_ELAPSED_WINDOW => {
-                es.remove(0);
-            }
-            _ => (),
-        };
-        es.push(elapsed)
     }
 }
 
@@ -303,8 +333,11 @@ impl TryFrom<RandomJson> for Random {
     }
 }
 
-fn new_http_client(agent: Option<reqwest::header::HeaderValue>) -> Result<reqwest::Client> {
-    let b = reqwest::Client::builder();
+fn new_http_client(
+    max: usize,
+    agent: Option<reqwest::header::HeaderValue>,
+) -> Result<reqwest::Client> {
+    let b = reqwest::Client::builder().pool_max_idle_per_host(max);
     let b = match agent {
         Some(agent) => b.user_agent(agent),
         None => b,

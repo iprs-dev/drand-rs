@@ -10,7 +10,7 @@ pub(crate) struct State {
     pub(crate) check_point: Option<Random>,
     pub(crate) determinism: bool,
     pub(crate) secure: bool,
-    pub(crate) max_conns: u32,
+    pub(crate) max_conns: usize,
 }
 
 impl Default for State {
@@ -241,7 +241,7 @@ impl Endpoints {
                 endpoints.push(i)
             }
         }
-        enpoints
+        endpoints
     }
 }
 
