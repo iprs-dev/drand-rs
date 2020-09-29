@@ -110,13 +110,23 @@ impl fmt::Debug for Error {
 
 impl error::Error for Error {}
 
+// TODO: Is there any way to use info.hash to validate the first round of
+// randomness.
+
 /// Type captures the drand-group's hash-info.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Info {
+    /// Distributed public key of the drand group.
     pub public_key: Vec<u8>,
+    /// Time in seconds between randomness beacon rounds.
     pub period: time::Duration,
+    /// Time in seconds since the Unix Epoch that the group began generating
+    /// randomness
     pub genesis_time: time::SystemTime,
+    /// Chain-hash, which uniquely identifies the drand chain. It is used as
+    /// a root of trust for validation of the first round of randomness.
     pub hash: Vec<u8>,
+    /// Use as previous_signature to validate the first round of randomness.
     pub group_hash: Vec<u8>,
 }
 
@@ -138,9 +148,13 @@ impl Default for Info {
 /// and the group's hash-info.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Random {
+    /// Sequentially increasing integer - the randomness round index.
     pub round: u128,
+    /// SHA-256 hash of the signature.
     pub randomness: Vec<u8>,
+    /// Boneh-Lynn-Shacham (BLS) signature for this round of randomness.
     pub signature: Vec<u8>,
+    /// Signature of the previous round of randomness.
     pub previous_signature: Vec<u8>,
 }
 
