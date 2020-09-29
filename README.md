@@ -44,7 +44,7 @@ on the server side:
 
 **Reference:**
 
-https://en.wikipedia.org/wiki/Threshold_cryptosystem
-https://en.wikipedia.org/wiki/Secret_sharing
-https://en.wikipedia.org/wiki/Verifiable_secret_sharing
-https://en.wikipedia.org/wiki/Distributed_key_generation
+* [Threshold cryptosystem](https://en.wikipedia.org/wiki/Threshold_cryptosystem)
+* [Secret sharing](https://en.wikipedia.org/wiki/Secret_sharing)
+* [Verifiable secret sharing](https://en.wikipedia.org/wiki/Verifiable_secret_sharing)
+* [Distributed key generation](https://en.wikipedia.org/wiki/Distributed_key_generation)
