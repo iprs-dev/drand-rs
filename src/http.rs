@@ -288,7 +288,7 @@ struct InfoJson {
     period: u64,
     genesis_time: u64,
     hash: String,
-    #[serde(alias = "groupHash")] // TODO: ask this to drand/drand community.
+    #[serde(alias = "groupHash")]
     group_hash: String,
 }
 

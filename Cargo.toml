@@ -1,6 +1,6 @@
 [package]
 name = "drand-rs"
-version = "0.1.0"
+version = "0.0.1"
 authors = ["prataprc <prataprc@gmail.com>"]
 edition = "2018"
 
@@ -11,7 +11,7 @@ hex = "0.4"
 sha2 = "0.9.1"
 reqwest = { version = "0.10.8", features = ["json"] }
 serde = { version = "1.0.116", features = ["derive"] }
-drand-verify = { path = "/home/prataprc/tmp/drand-verify" }
+drand-verify = { git = "https://github.com/CosmWasm/drand-verify" }
 futures = "0.3.5"
 tokio = "0.2"
 

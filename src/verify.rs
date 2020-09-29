@@ -1,12 +1,9 @@
-// TODO: use github version of drand-verify, not the local version.
-
 use crate::{Error, Random, Result};
 
 pub(crate) fn verify_chain(pk: &[u8], previous_signature: &[u8], curr: &Random) -> Result<bool> {
     if previous_signature != curr.previous_signature.as_slice() {
         let s = hex::encode(previous_signature);
         let p = hex::encode(&curr.previous_signature);
-        // TODO: display as hex.
         err_at!(NotSecure, msg: format!("mismatch chain {:?} != {:?}", s, p))?
     }
 
