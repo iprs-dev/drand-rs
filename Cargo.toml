@@ -1,5 +1,5 @@
 [package]
-name = "drand-rs"
+name = "drand"
 version = "0.0.1"
 authors = ["prataprc <prataprc@gmail.com>"]
 edition = "2018"
