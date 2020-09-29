@@ -1,3 +1,5 @@
+//! Module implement client interface to drand-group.
+
 use std::{
     cell::RefCell,
     sync::{Arc, Mutex},
@@ -5,14 +7,20 @@ use std::{
 
 use crate::{endpoints::Endpoints, Config, Error, Info, Random, Result};
 
+/// List of available endpoints.
 #[derive(Clone)]
 pub enum Endpoint {
+    /// https://api.drand.sh
     HttpDrandApi,
+    /// https://api2.drand.sh
     HttpDrandApi2,
+    /// https://api3.drand.sh
     HttpDrandApi3,
+    /// https://drand.cloudflare.com
     HttpCloudflare,
 }
 
+/// Type to interface with league-of-entropy.
 pub struct Client {
     name: String,
     inner: Arc<Mutex<RefCell<InnerClient>>>,
@@ -24,6 +32,8 @@ struct InnerClient {
 }
 
 impl Client {
+    /// Create a new client from `config` value, all clients are named.
+    /// Caller can choose a meaningful name.
     pub fn from_config(name: &str, config: Config) -> Client {
         let inner = InnerClient {
             _config: config.clone(),
@@ -35,19 +45,8 @@ impl Client {
         }
     }
 
-    pub fn to_info(&self) -> Result<Info> {
-        let info = {
-            let inner = err_at!(PoisonedLock, self.inner.lock())?;
-            let info = inner.borrow().endpoints.as_ref().unwrap().to_info();
-            info
-        };
-        Ok(info)
-    }
-
-    pub fn to_name(&self) -> String {
-        self.name.clone()
-    }
-
+    /// Add an endpoint to the client. Typically, endpoints are added to
+    /// the [Client] instance before called after its [boot] method.
     pub fn add_endpoint(&mut self, endp: Endpoint) -> Result<&mut Self> {
         {
             let inner = err_at!(PoisonedLock, self.inner.lock())?;
@@ -61,6 +60,25 @@ impl Client {
         Ok(self)
     }
 
+    /// Return the hash-info from drand-group. This call is meaningful
+    /// only after the [boot] method is called on this client.
+    pub fn to_info(&self) -> Result<Info> {
+        let info = {
+            let inner = err_at!(PoisonedLock, self.inner.lock())?;
+            let info = inner.borrow().endpoints.as_ref().unwrap().to_info();
+            info
+        };
+        Ok(info)
+    }
+
+    /// Return back the client's name.
+    pub fn to_name(&self) -> String {
+        self.name.clone()
+    }
+
+    /// Boot a client. Will verify the endpoint's hash-info and if
+    /// configured verify the chain of randomness from root-of-trust or
+    /// previous-check-point to latest randomness.
     pub fn boot(&mut self, chain_hash: Option<Vec<u8>>) -> Result<()> {
         use futures::executor::block_on;
 
@@ -78,6 +96,7 @@ impl Client {
         block_on(fut)
     }
 
+    /// Get requested round of randomness.
     pub fn get(&mut self, round: Option<u128>) -> Result<Random> {
         use futures::executor::block_on;
 
@@ -95,45 +114,6 @@ impl Client {
         block_on(fut)
     }
 }
-
-//impl DrandClient for Client {
-//    type I = ClientInfo;
-//    type R = ClientRound;
-//
-//    fn to_info(&self) -> Result<Self::I> {
-//        use Client::*;
-//
-//        match self {
-//            Empty(val) -> val.to_info().map(|info| into()),
-//        }
-//    }
-//
-//    fn round_at(&self, t: time::SystemTime) -> Result<u128> {
-//        use Client::*;
-//
-//        match self {
-//            Empty(val) -> val.to_round_at(t)
-//        }
-//    }
-//
-//    fn get_round(&self, round: u128) -> Result<Self::R> {
-//        use Client::*;
-//
-//        match self {
-//            Empty(val) -> val.get_round(round).map(|r| r.into())
-//        }
-//    }
-//
-//    fn watch_rounds(&self) -> Result<Box<dyn Iterator<Item=Result<Self::R>>>> {
-//        use Client::*;
-//
-//        let iter = match self {
-//            Empty(val) -> val.watch_rounds(t)?,
-//        };
-//
-//        Ok(Box::new(iter.map(|item| item.map(|r| r.into()))))
-//    }
-//}
 
 #[cfg(test)]
 #[path = "client_test.rs"]

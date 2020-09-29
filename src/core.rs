@@ -5,6 +5,7 @@ use std::{error, fmt, result, time};
 pub const MAX_CONNS: usize = 4;
 
 #[derive(Clone, Debug)]
+/// Configuration parameters for Client.
 pub struct Config {
     /// A previously fetched round serving as a verification checkpoint.
     ///
@@ -109,7 +110,7 @@ impl fmt::Debug for Error {
 
 impl error::Error for Error {}
 
-// Info is from main-net's `/info` endpoint.
+/// Type captures the drand-group's hash-info.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Info {
     pub public_key: Vec<u8>,
@@ -131,7 +132,10 @@ impl Default for Info {
     }
 }
 
-// Random is main-net's `/public/latest` and `/public/{round}` endpoints.
+/// Type captures randomness from drand-group for a single round.
+///
+/// This randomness can be verified at the client side using root-of-trust
+/// and the group's hash-info.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Random {
     pub round: u128,

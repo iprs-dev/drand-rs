@@ -11,7 +11,7 @@ mod verify;
 pub use crate::client::Client;
 pub use crate::core::{Config, Error, Info, Random, Result};
 
-pub const MAINNET_CHAIN_HASH: &'static str =
+const MAINNET_CHAIN_HASH: &'static str =
     "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce";
 
 // Trait for DrandClient, must eventually move to Client type.
