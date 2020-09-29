@@ -10,25 +10,25 @@ fn test_client_empty_endpoint() {
     assert!(client.get(None).is_err());
 }
 
-#[test]
-fn test_client_1_no_determinism() {
-    // with rot
-    // without rot
-    // invalid rot
-    todo!()
-}
-
-#[test]
-fn test_client_1_assumed_determinism() {
-    todo!()
-}
-
-#[test]
-fn test_client_1_reestablish_determinism() {
-    todo!()
-}
-
-#[test]
-fn test_client_1_continued_determinism() {
-    todo!()
-}
+//#[test]
+//fn test_client_1_no_determinism() {
+//    // with rot
+//    // without rot
+//    // invalid rot
+//    todo!()
+//}
+//
+//#[test]
+//fn test_client_1_assumed_determinism() {
+//    todo!()
+//}
+//
+//#[test]
+//fn test_client_1_reestablish_determinism() {
+//    todo!()
+//}
+//
+//#[test]
+//fn test_client_1_continued_determinism() {
+//    todo!()
+//}

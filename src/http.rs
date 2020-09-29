@@ -37,12 +37,12 @@ macro_rules! add_elapsed {
         match $res {
             Ok(val) => {
                 $this.add_elapsed($elapsed);
-                val
+                Ok(val)
             }
             err @ Err(_) => {
                 let elapsed = cmp::min($this.to_elapsed() * 2, MAX_ELAPSED);
                 $this.add_elapsed(elapsed);
-                err_at!(IOError, err)?
+                err
             }
         }
     }};
@@ -105,7 +105,7 @@ impl Http {
                 let url = make_url!("info", endpoint);
                 async_get!(client, url)
             };
-            let resp = add_elapsed!(self, res, elapsed);
+            let resp = err_at!(IOError, add_elapsed!(self, res, elapsed))?;
             let info: InfoJson = err_at!(JsonParse, resp.json().await)?;
             info.try_into()?
         };
@@ -135,6 +135,11 @@ impl Http {
 
         // get check_point
         state.check_point = match (state.determinism, state.check_point.take()) {
+            // reestablish-determinism
+            (true, None) => {
+                let r = self.do_get(&client, Some(1)).await?;
+                Some(self.verify(&state, r, latest, agent.clone()).await?)
+            }
             // continued-determinism
             (true, Some(check_point)) => {
                 let check_point = {
@@ -142,11 +147,6 @@ impl Http {
                     self.verify(&state, from, till, agent.clone()).await?
                 };
                 Some(check_point)
-            }
-            // reestablish-determinism
-            (true, None) => {
-                let r = self.do_get(&client, Some(1)).await?;
-                Some(self.verify(&state, r, latest, agent.clone()).await?)
             }
             // assumed-determinism
             (false, _) if state.secure => Some(latest),
@@ -263,7 +263,7 @@ impl Http {
                     let url = make_url!("public", endpoint, round);
                     async_get!(client, url)
                 };
-                let resp = add_elapsed!(self, res, elapsed);
+                let resp = err_at!(IOError, add_elapsed!(self, res, elapsed))?;
                 let r: RandomJson = err_at!(JsonParse, resp.json().await)?;
                 r.try_into()?
             }
@@ -272,7 +272,7 @@ impl Http {
                     let url = make_url!("public", endpoint);
                     async_get!(client, url)
                 };
-                let resp = add_elapsed!(self, res, elapsed);
+                let resp = err_at!(IOError, add_elapsed!(self, res, elapsed))?;
                 let r: RandomJson = err_at!(JsonParse, resp.json().await)?;
                 r.try_into()?
             }

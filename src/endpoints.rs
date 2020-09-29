@@ -78,23 +78,31 @@ impl Endpoints {
         self
     }
 
+    pub(crate) fn to_info(&self) -> Info {
+        self.state.info.clone()
+    }
+
     pub(crate) async fn boot(&mut self, chain_hash: Option<Vec<u8>>) -> Result<()> {
+        let agent = self.user_agent();
         // root of trust.
         let rot = chain_hash.as_ref().map(|x| x.as_slice());
         let (info, latest) = match self.endpoints.len() {
             0 => err_at!(Invalid, msg: format!("initialize endpoint"))?,
-            1 => self.endpoints[0].boot_phase1(rot).await?,
+            1 => self.endpoints[0].boot_phase1(rot, agent.clone()).await?,
             _ => {
                 let (info, latest) = {
                     let endp = &mut self.endpoints[0];
-                    endp.boot_phase1(rot).await?
+                    endp.boot_phase1(rot, agent.clone()).await?
                 };
 
                 let mut tail = vec![];
                 for mut endp in self.endpoints[1..].to_vec() {
                     let (info1, latest1) = (info.clone(), latest.clone());
                     tail.push(async {
-                        let (info2, _) = endp.boot_phase1(rot).await?;
+                        let (info2, _) = {
+                            let agent = agent.clone();
+                            endp.boot_phase1(rot, agent).await?
+                        };
 
                         Self::boot_validate_info(info1, info2)?;
 
@@ -104,7 +112,10 @@ impl Endpoints {
                             s.secure = false;
                             s
                         };
-                        let (_, r) = endp.get(s, Some(latest1.round)).await?;
+                        let (_, r) = {
+                            let round = Some(latest1.round);
+                            endp.get(s, round, agent.clone()).await?
+                        };
                         Self::boot_validate_latest(latest1, r)?;
 
                         Ok::<Inner, Error>(endp)
@@ -120,19 +131,22 @@ impl Endpoints {
         self.state.info = info;
         self.state = {
             let s = self.state.clone();
-            self.endpoints[0].boot_phase2(s, latest).await?
+            self.endpoints[0]
+                .boot_phase2(s, latest, agent.clone())
+                .await?
         };
 
         Ok(())
     }
 
     pub(crate) async fn get(&mut self, round: Option<u128>) -> Result<Random> {
+        let agent = self.user_agent();
         let (state, r) = loop {
             match self.get_endpoint_pair() {
                 (Some(mut e1), Some(mut e2)) => {
                     let (res1, res2) = futures::join!(
-                        e1.get(self.state.clone(), round),
-                        e2.get(self.state.clone(), round),
+                        e1.get(self.state.clone(), round, agent.clone()),
+                        e2.get(self.state.clone(), round, agent.clone()),
                     );
                     match (res1, res2) {
                         (Ok((s1, r1)), Ok((s2, r2))) => {
@@ -148,7 +162,8 @@ impl Endpoints {
                     };
                 }
                 (Some(mut e1), None) => {
-                    let (state, r) = e1.get(self.state.clone(), round).await?;
+                    let state = self.state.clone();
+                    let (state, r) = e1.get(state, round, agent).await?;
                     break (state, r);
                 }
                 (None, _) => {
@@ -160,10 +175,6 @@ impl Endpoints {
         self.state = state;
 
         Ok(r)
-    }
-
-    pub(crate) fn to_info(&self) -> Info {
-        self.state.info.clone()
     }
 }
 
@@ -232,16 +243,11 @@ impl Endpoints {
         }
     }
 
-    fn active_endpoints(&self) -> Vec<usize> {
-        use crate::http::MAX_ELAPSED;
+    fn user_agent(&self) -> Option<reqwest::header::HeaderValue> {
+        use reqwest::header::HeaderValue;
 
-        let mut endpoints = vec![];
-        for (i, endp) in self.endpoints.iter().enumerate() {
-            if endp.to_elapsed() < MAX_ELAPSED {
-                endpoints.push(i)
-            }
-        }
-        endpoints
+        let agent = format!("drand-rs-{}", self.name);
+        HeaderValue::from_str(&agent).ok()
     }
 }
 
@@ -251,22 +257,33 @@ enum Inner {
 }
 
 impl Inner {
-    async fn boot_phase1(&mut self, rot: Option<&[u8]>) -> Result<(Info, Random)> {
-        let agent = self.user_agent();
+    async fn boot_phase1(
+        &mut self,
+        rot: Option<&[u8]>,
+        agent: Option<reqwest::header::HeaderValue>,
+    ) -> Result<(Info, Random)> {
         match self {
             Inner::Http { endp, .. } => endp.boot_phase1(rot, agent).await,
         }
     }
 
-    async fn boot_phase2(&mut self, state: State, latest: Random) -> Result<State> {
-        let agent = self.user_agent();
+    async fn boot_phase2(
+        &mut self,
+        state: State,
+        latest: Random,
+        agent: Option<reqwest::header::HeaderValue>,
+    ) -> Result<State> {
         match self {
             Inner::Http { endp, .. } => endp.boot_phase2(state, latest, agent).await,
         }
     }
 
-    async fn get(&mut self, state: State, round: Option<u128>) -> Result<(State, Random)> {
-        let agent = self.user_agent();
+    async fn get(
+        &mut self,
+        state: State,
+        round: Option<u128>,
+        agent: Option<reqwest::header::HeaderValue>,
+    ) -> Result<(State, Random)> {
         match self {
             Inner::Http { endp, .. } => endp.get(state, round, agent).await,
         }
@@ -275,17 +292,6 @@ impl Inner {
     fn to_elapsed(&self) -> time::Duration {
         match self {
             Inner::Http { endp, .. } => endp.to_elapsed(),
-        }
-    }
-
-    fn user_agent(&self) -> Option<reqwest::header::HeaderValue> {
-        use reqwest::header::HeaderValue;
-
-        match self {
-            Inner::Http { name, .. } => {
-                let agent = format!("drand-rs-{}", name);
-                HeaderValue::from_str(&agent).ok()
-            }
         }
     }
 }

@@ -6,7 +6,6 @@ use super::*;
 #[test]
 fn test_verify() {
     use crate::http::Http;
-    use hex_literal::hex;
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
 
